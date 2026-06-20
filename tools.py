@@ -69,8 +69,87 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    # 1. Filter by optional price ceiling and optional size first.
+    candidates = []
+    for item in listings:
+        if max_price is not None and item["price"] > max_price:
+            continue
+        if size is not None and size.strip():
+            # Case-insensitive substring match: "M" matches "S/M",
+            # "8" matches "US 8" and "US 8.5".
+            if size.strip().lower() not in item["size"].lower():
+                continue
+        candidates.append(item)
+
+    # 2. Tokenize the description into meaningful keywords.
+    keywords = _keywords(description)
+    if not keywords:
+        # No usable keywords — fall back to returning everything that passed
+        # the size/price filters, cheapest first, rather than nothing.
+        return sorted(candidates, key=lambda it: it["price"])
+
+    # 3. Score each candidate by keyword overlap and drop zero-relevance items.
+    scored = []
+    for item in candidates:
+        score = _score_listing(item, keywords)
+        if score > 0:
+            scored.append((score, item))
+
+    # 4. Sort by score (highest first), tie-break on price (cheapest first).
+    scored.sort(key=lambda pair: (-pair[0], pair[1]["price"]))
+    return [item for _score, item in scored]
+
+
+# ── search helpers ─────────────────────────────────────────────────────────────
+
+# Common words that carry no search signal — stripped before keyword matching.
+_STOPWORDS = {
+    "a", "an", "and", "the", "for", "with", "in", "on", "of", "to", "or",
+    "i", "im", "me", "my", "looking", "want", "need", "find", "some", "any",
+    "that", "this", "under", "below", "over", "size", "sized", "price",
+    "cheap", "around", "about", "is", "are", "it", "would", "like",
+}
+
+
+def _keywords(description: str) -> list[str]:
+    """Lowercase the description and split it into significant search tokens."""
+    if not description:
+        return []
+    cleaned = "".join(ch.lower() if ch.isalnum() else " " for ch in description)
+    return [
+        tok for tok in cleaned.split()
+        if len(tok) > 1 and tok not in _STOPWORDS
+    ]
+
+
+def _score_listing(item: dict, keywords: list[str]) -> int:
+    """
+    Count how strongly a listing matches the keywords.
+
+    Title and style_tags hits are weighted more heavily than body/colors/category
+    matches, since they are the strongest signals of relevance.
+    """
+    title = item.get("title", "").lower()
+    body = item.get("description", "").lower()
+    category = item.get("category", "").lower()
+    tags = " ".join(item.get("style_tags", [])).lower()
+    colors = " ".join(item.get("colors", [])).lower()
+
+    score = 0
+    for kw in keywords:
+        if kw in title:
+            score += 3
+        if kw in tags:
+            score += 3
+        if kw in category:
+            score += 2
+        if kw in colors:
+            score += 2
+        if kw in body:
+            score += 1
+    return score
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +179,69 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    item_desc = _format_item(new_item)
+    items = (wardrobe or {}).get("items", [])
+
+    if not items:
+        # Empty/minimal wardrobe — general styling advice, not an error.
+        prompt = (
+            f"A shopper is considering buying this secondhand item:\n{item_desc}\n\n"
+            "They haven't added any pieces from their own closet yet. "
+            "Suggest how to style this item on its own: what kinds of pieces "
+            "(by category and color) pair well with it, and what overall vibe "
+            "it suits. Keep it to 2-3 short, friendly sentences. Do NOT invent "
+            "specific pieces as if they already own them."
+        )
+    else:
+        wardrobe_text = "\n".join(f"- {_format_wardrobe_item(w)}" for w in items)
+        prompt = (
+            f"A shopper is considering buying this secondhand item:\n{item_desc}\n\n"
+            f"Here is their current wardrobe:\n{wardrobe_text}\n\n"
+            "Suggest 1-2 complete head-to-toe outfits built around the new item, "
+            "naming specific pieces from their wardrobe by name. Mention shoes and "
+            "an accessory or layer where it makes sense. Keep each outfit to 1-2 "
+            "sentences and sound like an enthusiastic friend giving styling advice."
+        )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are FitFindr, a warm, knowledgeable secondhand-fashion "
+                        "stylist. Give concrete, wearable outfit ideas."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=400,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text:
+            return text
+        # Empty completion — fall through to the deterministic fallback.
+    except Exception:
+        pass
+
+    # Graceful fallback if the LLM is unreachable / errors / returns nothing.
+    return _outfit_fallback(new_item)
+
+
+def _outfit_fallback(new_item: dict) -> str:
+    """Deterministic styling string built from the item's own attributes."""
+    title = new_item.get("title", "this piece")
+    category = new_item.get("category", "item")
+    tags = ", ".join(new_item.get("style_tags", [])) or "versatile"
+    colors = ", ".join(new_item.get("colors", [])) or "neutral"
+    return (
+        f"I couldn't reach the styling model right now, but the {title} is a "
+        f"{tags} {category} in {colors}. It would pair well with simple neutral "
+        "basics, a structured layer, and your go-to shoes for an easy everyday look."
+    )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +273,88 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    # 1. Guard against an empty / whitespace-only outfit — return a message,
+    #    never raise.
+    if not outfit or not outfit.strip():
+        return (
+            "I need an outfit suggestion before I can write a fit card. "
+            "Try searching again so I can style a specific piece."
+        )
+
+    title = new_item.get("title", "this thrifted find")
+    price = new_item.get("price")
+    price_str = f"${price:.0f}" if isinstance(price, (int, float)) else "a steal"
+    platform = new_item.get("platform", "secondhand")
+
+    prompt = (
+        f"Write a short, shareable social-media caption (2-4 sentences) for an "
+        f"outfit-of-the-day post about a thrifted find.\n\n"
+        f"Item: {title}\n"
+        f"Price: {price_str}\n"
+        f"Platform: {platform}\n"
+        f"The outfit it's styled in:\n{outfit}\n\n"
+        "Make it casual and authentic, like a real OOTD post (not a product "
+        f"description). Mention the item name, the price ({price_str}), and the "
+        f"platform ({platform}) naturally — once each. Capture the outfit vibe in "
+        "specific terms and end with 2-3 relevant hashtags. A tasteful emoji or "
+        "two is fine."
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a trend-savvy thrift influencer writing punchy, "
+                        "original OOTD captions. Never repeat yourself."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=1.1,  # high temperature → captions vary across runs
+            max_tokens=200,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    # Deterministic fallback caption if the LLM is unreachable / returns nothing.
+    return (
+        f"Just thrifted the {title} for {price_str} on {platform} ✨ styling it "
+        "up next — stay tuned. #thriftfinds #ootd #secondhandstyle"
+    )
+
+
+# ── formatting helpers (shared by the LLM tools) ────────────────────────────────
+
+def _format_item(item: dict) -> str:
+    """Render a listing dict as a compact prompt-friendly description."""
+    title = item.get("title", "Untitled item")
+    category = item.get("category", "item")
+    tags = ", ".join(item.get("style_tags", [])) or "n/a"
+    colors = ", ".join(item.get("colors", [])) or "n/a"
+    desc = item.get("description", "")
+    return (
+        f"{title} (category: {category}; colors: {colors}; "
+        f"style: {tags}). {desc}"
+    )
+
+
+def _format_wardrobe_item(w: dict) -> str:
+    """Render a wardrobe item dict as a single readable line for a prompt."""
+    name = w.get("name", "unnamed piece")
+    category = w.get("category", "")
+    colors = ", ".join(w.get("colors", []))
+    notes = w.get("notes")
+    line = f"{name} ({category}"
+    if colors:
+        line += f", {colors}"
+    line += ")"
+    if notes:
+        line += f" — {notes}"
+    return line

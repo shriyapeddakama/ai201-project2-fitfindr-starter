@@ -18,6 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -92,10 +94,113 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: fresh session — the single source of truth for this interaction.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the raw query into description / size / max_price (regex).
+    session["parsed"] = _parse_query(query)
+    description = session["parsed"]["description"]
+    size = session["parsed"]["size"]
+    max_price = session["parsed"]["max_price"]
+
+    # Step 3: search. This is the conditional branch point of the loop.
+    session["search_results"] = search_listings(description, size, max_price)
+
+    if not session["search_results"]:
+        # ERROR BRANCH — no item to style, so terminate early. We do NOT call
+        # suggest_outfit or create_fit_card. fit_card / outfit_suggestion stay None.
+        filters = []
+        if size is not None:
+            filters.append(f"size {size}")
+        if max_price is not None:
+            filters.append(f"under ${max_price:.0f}")
+        filter_str = (" in " + ", ".join(filters)) if filters else ""
+        session["error"] = (
+            f"No listings matched '{description}'{filter_str}. "
+            "Try removing the size filter, raising your budget, or using broader "
+            "keywords (e.g. 'graphic tee' instead of a specific print)."
+        )
+        return session
+
+    # Step 4: select the top-ranked match and store it in the session.
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: style the selected item against the wardrobe. suggest_outfit handles
+    # the empty-wardrobe case internally and always returns a non-empty string.
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+
+    # Step 6: turn the outfit + item into a shareable caption.
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
+    # Step 7: done — error is None, all output fields populated.
     return session
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+# Standalone clothing-size tokens we recognize in free text. Restricted to the
+# unambiguous multi-letter sizes: bare single letters (s/m/l) match too eagerly
+# in natural prose (e.g. the "s" in "What's") and cause false size filters, so a
+# single-letter size must be given explicitly as "size S".
+_SIZE_TOKENS = ["xxs", "xs", "xxl", "xl"]
+
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract a search description, an optional size, and an optional max_price
+    from a free-text query using regex. Returns a dict with keys
+    'description', 'size', 'max_price' — matching the Planning Loop spec.
+    """
+    text = query or ""
+    size = None
+    max_price = None
+    # Spans of the original text we consume for size/price, removed from the
+    # leftover description so they don't pollute keyword search.
+    consumed_spans = []
+
+    # max_price: a dollar amount after under / below / less than / <= / <  or  $.
+    price_pat = re.compile(
+        r"(?:under|below|less than|<=|<|max(?:imum)?|up to)\s*\$?\s*(\d+(?:\.\d+)?)"
+        r"|\$\s*(\d+(?:\.\d+)?)",
+        re.IGNORECASE,
+    )
+    m = price_pat.search(text)
+    if m:
+        max_price = float(m.group(1) or m.group(2))
+        consumed_spans.append(m.span())
+
+    # size: explicit "size <token>" (token may be a letter size or a number).
+    size_phrase = re.search(
+        r"\bsize\s+([a-zA-Z0-9.\-/]+)", text, re.IGNORECASE
+    )
+    if size_phrase:
+        size = size_phrase.group(1).upper()
+        consumed_spans.append(size_phrase.span())
+    else:
+        # standalone letter-size token as its own word, e.g. "... tee M"
+        for tok in _SIZE_TOKENS:
+            tm = re.search(rf"\b({tok})\b", text, re.IGNORECASE)
+            if tm:
+                size = tm.group(1).upper()
+                consumed_spans.append(tm.span())
+                break
+
+    # description: original text minus the consumed size/price spans, tidied up.
+    description = text
+    for start, end in sorted(consumed_spans, key=lambda s: s[0], reverse=True):
+        description = description[:start] + " " + description[end:]
+    # collapse whitespace and strip trailing filler punctuation.
+    description = re.sub(r"\s+", " ", description).strip(" ,.-")
+
+    # If stripping left nothing usable, fall back to the full original query.
+    if not description:
+        description = text.strip()
+
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── CLI test ──────────────────────────────────────────────────────────────────
